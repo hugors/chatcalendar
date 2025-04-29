@@ -19,23 +19,44 @@ client.on('ready', () => {
   console.log('🤖 Bot pronto!');
 });
 
+client.on('auth_failure', msg => {
+  console.error('❌ Falha de autenticação:', msg);
+});
+
+client.on('disconnected', reason => {
+  console.log('🚫 Cliente desconectado:', reason);
+});
+
 client.on('message', async (msg) => {
   const texto = msg.body.toLowerCase();
 
+  if (['oi', 'olá', 'bom dia', 'boa tarde', 'boa noite'].some(saudacao => texto.includes(saudacao))) {
+    await msg.reply('👋 Olá! Eu sou a *EVA*, sua assistente virtual.\nEstou aqui para te ajudar com *agendamentos de consultas* e visualizar seus *eventos no calendário*. 😊\n\nDigite:\n👉 *agendar consulta* para iniciar um agendamento\n👉 *meus eventos* para ver seus próximos compromissos');
+    return;
+  }
+
   if (texto.includes('agendar consulta')) {
-    // Aqui você pode integrar a parte de Google Calendar
     const authUrl = getAuthUrl();
-    await msg.reply(`Por favor, acesse este link para autorizar o acesso ao seu Google Calendar: ${authUrl}`);
+    await msg.reply(`🔐 Para agendar uma consulta, por favor, autorize o acesso ao seu Google Calendar neste link:\n${authUrl}`);
+    return;
   }
 
   if (texto.includes('meus eventos')) {
-    // Depois que o usuário autorizar o Google Calendar, você pode listar os eventos
     const eventos = await listEvents();
-    let mensagemEventos = 'Aqui estão seus próximos eventos:\n';
-    eventos.forEach((evento) => {
-      mensagemEventos += `${evento.summary} - ${evento.start.dateTime || evento.start.date} \n`;
-    });
+
+    let mensagemEventos = '👋 Olá! Eu sou a *EVA*, sua assistente virtual.\nEstou aqui para te ajudar com *agendamentos de consultas*.\n\n';
+
+    if (!eventos || eventos.length === 0) {
+      mensagemEventos += '📅 Você não tem eventos agendados nos próximos dias.';
+    } else {
+      mensagemEventos += '📅 Aqui estão seus próximos eventos:\n\n';
+      eventos.forEach((evento) => {
+        mensagemEventos += `✅ *${evento.summary}* - ${evento.start.dateTime || evento.start.date}\n`;
+      });
+    }
+
     await msg.reply(mensagemEventos);
+    return;
   }
 });
 
