@@ -1,70 +1,32 @@
+// index.js
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
-const { createEvent, listUserEvents, deleteEventBySummary, updateEvent } = require('./googleCalendar');
+const { google } = require('googleapis');
+const fs = require('fs');
 require('dotenv').config();
+
+const SESSIONS = new Map();
+
+const calendar = google.calendar('v3');
+const auth = new google.auth.JWT(
+  process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  null,
+  process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  ['https://www.googleapis.com/auth/calendar']
+);
 
 const client = new Client({
   authStrategy: new LocalAuth(),
-  puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'] }
+  puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'] },
 });
 
-client.on('qr', qr => {
-  console.log('📲 Escaneie o QR Code:');
+client.on('qr', (qr) => {
+  console.log('QR Code gerado. Escaneie para continuar...');
   qrcode.generate(qr, { small: true });
 });
 
 client.on('ready', () => {
-  console.log('🤖 EVA está online!');
-});
-
-client.on('message', async msg => {
-  const texto = msg.body.toLowerCase();
-  const userId = msg.from.replace(/[@:\s]/g, '');
-
-  // Apresentação
-  if (["oi", "olá", "bom dia", "boa tarde", "boa noite"].some(t => texto.includes(t))) {
-    return msg.reply('Olá! Eu sou a EVA 🤖, sua assistente virtual. Posso te ajudar com agendamentos, reagendamentos ou cancelamentos.');
-  }
-
-  // Agendamento
-  if (texto.startsWith('agendar')) {
-    const [, titulo, data, hora] = texto.split('|').map(t => t.trim());
-    const start = new Date(`${data}T${hora}:00`);
-    const end = new Date(start.getTime() + 30 * 60000); // 30 minutos
-    try {
-      await createEvent(userId, titulo, start.toISOString(), end.toISOString());
-      return msg.reply(`✅ Consulta "${titulo}" agendada para ${data} às ${hora}.`);
-    } catch (e) {
-      return msg.reply('❌ Ocorreu um erro ao agendar. Verifique os dados.');
-    }
-  }
-
-  // Reagendamento
-  if (texto.startsWith('reagendar')) {
-    const [, titulo, novaData, novaHora] = texto.split('|').map(t => t.trim());
-    const newStart = new Date(`${novaData}T${novaHora}:00`);
-    const newEnd = new Date(newStart.getTime() + 30 * 60000);
-    const sucesso = await updateEvent(userId, titulo, newStart.toISOString(), newEnd.toISOString());
-    return msg.reply(sucesso ? `🔄 Consulta "${titulo}" reagendada com sucesso.` : '❌ Evento não encontrado.');
-  }
-
-  // Cancelamento
-  if (texto.startsWith('cancelar')) {
-    const [, titulo] = texto.split('|').map(t => t.trim());
-    const sucesso = await deleteEventBySummary(userId, titulo);
-    return msg.reply(sucesso ? `🗑️ Consulta "${titulo}" cancelada.` : '❌ Evento não encontrado.');
-  }
-
-  // Listar eventos
-  if (texto.includes('meus eventos')) {
-    const eventos = await listUserEvents(userId);
-    if (eventos.length === 0) return msg.reply('📭 Nenhum evento encontrado.');
-    let resposta = '📅 Seus próximos eventos:\n\n';
-    eventos.forEach(e => {
-      resposta += `• ${e.summary.replace(`[${userId}] `, '')} - ${e.start.dateTime?.replace('T', ' ').slice(0, 16)}\n`;
-    });
-    return msg.reply(resposta);
-  }
+  console.log('🤖 EVA pronta para agendar!');
 });
 
 client.on('auth_failure', msg => {
@@ -73,6 +35,64 @@ client.on('auth_failure', msg => {
 
 client.on('disconnected', reason => {
   console.log('🚫 Cliente desconectado:', reason);
+});
+
+client.on('message', async (msg) => {
+  const chatId = msg.from;
+  const texto = msg.body.toLowerCase();
+
+  if (!SESSIONS.has(chatId)) {
+    SESSIONS.set(chatId, { etapa: 0 });
+  }
+  const sessao = SESSIONS.get(chatId);
+
+  if (['oi', 'olá', 'bom dia', 'boa tarde', 'boa noite'].some(t => texto.includes(t))) {
+    await msg.reply('Olá! Eu sou a EVA 🤖, sua assistente virtual. Posso te ajudar a *agendar*, *reagendar* ou *cancelar* uma consulta. O que deseja fazer?');
+    sessao.etapa = 0;
+    return;
+  }
+
+  // Etapas de agendamento
+  if (texto.includes('agendar')) {
+    sessao.acao = 'agendar';
+    sessao.etapa = 1;
+    await msg.reply('Perfeito! Qual a data da consulta? (Ex: 2025-05-01)');
+    return;
+  }
+
+  if (sessao.acao === 'agendar') {
+    if (sessao.etapa === 1) {
+      sessao.data = texto;
+      sessao.etapa = 2;
+      await msg.reply('E o horário da consulta? (Ex: 15:30)');
+      return;
+    }
+
+    if (sessao.etapa === 2) {
+      sessao.hora = texto;
+      const dateTime = new Date(`${sessao.data}T${sessao.hora}:00`);
+      const phone = msg.from.replace('@c.us', '');
+      try {
+        await auth.authorize();
+        await calendar.events.insert({
+          auth,
+          calendarId: process.env.CALENDAR_ID,
+          requestBody: {
+            summary: 'Consulta Terapia',
+            description: `Agendado via WhatsApp pelo número ${phone}`,
+            start: { dateTime: dateTime.toISOString(), timeZone: 'America/Sao_Paulo' },
+            end: { dateTime: new Date(dateTime.getTime() + 60 * 60 * 1000).toISOString(), timeZone: 'America/Sao_Paulo' },
+          },
+        });
+        await msg.reply(`Consulta agendada com sucesso para ${sessao.data} às ${sessao.hora} ✅`);
+      } catch (err) {
+        console.error(err);
+        await msg.reply('❌ Ocorreu um erro ao tentar agendar. Tente novamente.');
+      }
+      SESSIONS.delete(chatId);
+      return;
+    }
+  }
 });
 
 client.initialize();
